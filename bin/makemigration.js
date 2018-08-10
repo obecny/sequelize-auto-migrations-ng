@@ -83,7 +83,7 @@ queryInterface.createTable('SequelizeMeta', {
 }).then(() => {
   queryInterface.createTable('SequelizeMetaMigrations', {
     revision: {
-      type: Sequelize.INTEGER,
+      type: Sequelize.STRING,
       allowNull: false,
       unique: true,
       primaryKey: true,
