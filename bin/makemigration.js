@@ -3,6 +3,7 @@
 const commandLineArgs = require('command-line-args');
 const beautify = require('js-beautify').js_beautify;
 const Sequelize = require('sequelize');
+const moment = require('moment');
 
 const migrate = require('../lib/migrate');
 
@@ -36,6 +37,9 @@ const optionDefinitions = [
   {
     name: 'help', alias: 'h', type: Boolean, description: 'Show this message',
   },
+  {
+    name: 'reset-state', type: String, description: 'reset state migration current state of db',
+  },
 ];
 
 const options = commandLineArgs(optionDefinitions);
@@ -51,6 +55,7 @@ if (options.help) {
 
 const migrationsDir = path.join(process.env.PWD || process.cwd(), options['migrations-path'] || 'migrations');
 const modelsDir = path.join(process.env.PWD || process.cwd(), options['models-path'] || 'models');
+const resetState = options['reset-state'];
 
 // current state
 const currentState = {
@@ -83,7 +88,7 @@ queryInterface.createTable('SequelizeMeta', {
 }).then(() => {
   queryInterface.createTable('SequelizeMetaMigrations', {
     revision: {
-      type: Sequelize.INTEGER,
+      type: Sequelize.STRING,
       allowNull: false,
       unique: true,
       primaryKey: true,
@@ -97,14 +102,27 @@ queryInterface.createTable('SequelizeMeta', {
       allowNull: false,
     },
   }).then(() => {
-  // We get the state at the last migration executed
+    // We get the state at the last migration executed
     sequelize.query('SELECT name FROM "SequelizeMeta" ORDER BY "name" desc limit 1', { type: sequelize.QueryTypes.SELECT })
       .then(([lastExecutedMigration]) => {
-        sequelize.query(`SELECT state FROM "SequelizeMetaMigrations" where "revision" = '${lastExecutedMigration === undefined ? -1 : lastExecutedMigration.name.split('-')[0]}'`, { type: sequelize.QueryTypes.SELECT })
+        let revision = lastExecutedMigration === undefined ? -1 : lastExecutedMigration.name.split('-')[0];
+        if (!lastExecutedMigration && resetState) {
+          process.exit(0);
+          return;
+        }
+        sequelize.query(`SELECT state FROM "SequelizeMetaMigrations" where "revision" = '${revision}'`, { type: sequelize.QueryTypes.SELECT })
           .then(([lastMigration]) => {
-            if (lastMigration !== undefined) previousState = lastMigration.state;
+            if (!resetState && lastMigration !== undefined) {
+              previousState = lastMigration.state;
+            }
 
             currentState.tables = migrate.reverseModels(sequelize, models);
+
+            if (resetState) {
+              currentState.revision = revision;
+            } else {
+              currentState.revision = moment().format('YYYYMMDDHHmmss');
+            }
 
             const actions = migrate.parseDifference(previousState.tables, currentState.tables);
 
@@ -119,7 +137,7 @@ queryInterface.createTable('SequelizeMeta', {
 
             migration.commandsDown = tmp.commandsUp;
 
-            if (migration.commandsUp.length === 0) {
+            if (!resetState && migration.commandsUp.length === 0) {
               console.log('No changes found');
               process.exit(0);
             }
@@ -135,33 +153,38 @@ queryInterface.createTable('SequelizeMeta', {
               process.exit(0);
             }
 
-            // Bump revision
-            currentState.revision = previousState.revision + 1;
-
-            migrate.pruneOldMigFiles(currentState.revision, migrationsDir, options).then(() => {
-              // write migration to file
-              const info = migrate.writeMigration(
-                currentState.revision,
-                migration,
-                migrationsDir,
-                (options.name) ? options.name : 'noname',
-                (options.comment) ? options.comment : '',
-              );
-
-              console.log(`New migration to revision ${currentState.revision} has been saved to file '${info.filename}'`);
+            migrate.pruneOldMigFiles(revision, migrationsDir, options).then(() => {
+              let name;
+              if (resetState) {
+                name = lastExecutedMigration.name;
+              } else {
+                // write migration to file
+                const info = migrate.writeMigration(
+                  currentState.revision,
+                  migration,
+                  migrationsDir,
+                  (options.name) ? options.name : 'noname',
+                  (options.comment) ? options.comment : '',
+                );
+                name = info.info.name;
+                console.log(`New migration to revision ${currentState.revision} has been saved to file '${info.filename}'`);
+              }
 
               // save current state
               // Ugly hack, see https://github.com/sequelize/sequelize/issues/8310
               const rows = [{
                 revision: currentState.revision,
-                name: info.info.name,
+                name: name,
                 state: JSON.stringify(currentState),
               }];
-
-              queryInterface.bulkDelete('SequelizeMetaMigrations', { revision: currentState.revision })
+              let sign = resetState ? ">=" : ">";
+              sequelize.query(`DELETE FROM "SequelizeMetaMigrations" where "revision" ${sign} '${revision}'`, { type: sequelize.QueryTypes.DELETE })
                 .then(() => {
                   queryInterface.bulkInsert('SequelizeMetaMigrations', rows)
                     .then(() => {
+                      if (resetState) {
+                        console.log(`Reset state to latest migration of '${name}' has been successfull`);
+                      }
                       if (options.verbose) console.log('Updated state on DB.');
                       if (options.execute) {
                         console.log(`Use sequelize CLI:
